@@ -1,9 +1,10 @@
 use clap::{value_parser, Arg, Command};
+use rand::seq::IteratorRandom;
 use std::fs::{self, File};
-use std::io::Write;
 use std::process::Command as ProcessCommand;
 use dirs;
 use clipboard::{self, ClipboardContext, ClipboardProvider};
+use std::io::*;
 
 // Gets args
 fn get_args() -> Command {
@@ -51,26 +52,27 @@ fn generate_password(length: u32, include_specials: bool) -> String {
     let mut rng = rand::thread_rng();
     let mut password = String::new();
     for _ in 0..length {
-        password.push(chars.chars().choose(&mut rng).unwrap());
+        if let Some(c) = chars.chars().choose(&mut rng) {
+            password.push(c);
+        }
     }
     password
 }
 
 // Check if path exists, if not, create
-fn check_path() {
-    let path = std::path::Path::new(PATH);
+fn check_path(path: &std::path::Path) {
     if !path.exists() {
         std::fs::create_dir_all(path).expect("Failed to create directory");
     }
-    let file_path = format!("{}passes.txt", PATH);
-    if !std::path::Path::new(&file_path).exists() {
+    let file_path = path.join("passes.txt");
+    if !file_path.exists() {
         File::create(&file_path).expect("Failed to create file");
     }
 }
 
 // Writeing the passwords to file
-fn file(password: String, name: String) {
-    let file_path = format!("{}passes.txt", PATH);
+fn file(password: &str, name: &str, path: &std::path::Path) {
+    let file_path = path.join("passes.txt");
     let mut file = fs::OpenOptions::new()
         .append(true)
         .open(&file_path)
@@ -79,8 +81,9 @@ fn file(password: String, name: String) {
 }
 
 // fzf implementation for copying passwords
-fn fzf_files() -> String {
-    let file_contents = std::fs::read_to_string(format!("{}passes.txt", PATH)).expect("Failed to read file");
+fn fzf_files(path: &std::path::Path) -> String {
+    let file_path = path.join("passes.txt");
+    let file_contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
     if file_contents.is_empty() {
         println!("No passwords found");
         return String::new();
@@ -89,10 +92,24 @@ fn fzf_files() -> String {
             .arg("--height=40%")
             .arg("--border")
             .arg("--prompt=Select a password: ")
-            .arg("--preview=cat {}")
-            .output()
-            .expect("Failed to execute fzf");
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn fzf")
+            .stdin.as_mut().expect("Failed to open stdin")
+            .write_all(file_contents.as_bytes())
+            .expect("Failed to write to stdin");
 
+        let output = ProcessCommand::new("fzf")
+            .arg("--height=40%")
+            .arg("--border")
+            .arg("--prompt=Select a password: ")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn fzf")
+            .wait_with_output()
+            .expect("Failed to read stdout");
         if output.status.success() {
             String::from_utf8_lossy(&output.stdout).trim().to_string()
         } else {
@@ -107,37 +124,42 @@ const LOWERCASE: &str = "abcdefghijklmnopqrstuvwxyz";
 const UPPERCASE: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const DIGITS: &str = "0123456789";
 const SPECIALS: &str = "!@#$%^&*()-_=+[{]};:'\",.<>/?";
-const HOME_DIR: &str = dirs::home_dir();
-const PATH: &str = format!("{}/.config/pass/", HOME_DIR).as_str();
 
 // Main
 fn main() {
     let matches = get_args().get_matches();
 
-    let length = matches.value_of("length").unwrap().parse().unwrap();
-    let include_specials = matches.is_present("specials");
-    let name = matches.value_of("name").unwrap_or_default().to_string();
+    let length = matches.get_one::<u32>("length").cloned().unwrap_or(15);
+    let include_specials = !matches.get_flag("specials");
+    let name = matches.get_one::<String>("name").cloned().unwrap_or_default();
 
-    check_path();
+    let home_dir = dirs::home_dir().expect("Failed to get home directory");
+    let path = home_dir.join(".config").join("pass");
+
+    check_path(&path);
 
     if name.is_empty() {
-        let output_fzf = fzf_files();
+        let output_fzf = fzf_files(&path);
         if !output_fzf.is_empty() {
             let mut clipboard: ClipboardContext = ClipboardProvider::new().expect("Failed to access clipboard");
-            let password = output_fzf.split(": ").last().unwrap().to_string();
-            let name = output_fzf.split(": ").first().unwrap().to_string();
-            print!("Selected app: {}", name);
-            println!("The app's password: {}", password);
-            clipboard.set_contents(password.to_string()).expect("Failed to copy to clipboard");
-            println!("Password copied to clipboard");
-        }
-        else {
+            let parts: Vec<&str> = output_fzf.splitn(2, ": ").collect();
+            if parts.len() == 2 {
+                let name = parts[0];
+                let password = parts[1];
+                println!("Selected app: {}", name);
+                println!("The app's password: {}", password);
+                clipboard.set_contents(password.to_string()).expect("Failed to copy to clipboard");
+                println!("Password copied to clipboard");
+            } else {
+                println!("Invalid password format");
+            }
+        } else {
             println!("No password selected or there are no passwords in the database");
         }
     } else {
         let password = generate_password(length, include_specials);
         println!("Generated password: {}", password);
-        file(password, name);
-        println!("Saved password to {}passes.txt", PATH);
+        file(&password, &name, &path);
+        println!("Saved password to {}", path.join("passes.txt").display());
     }
 }
