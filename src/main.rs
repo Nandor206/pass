@@ -88,30 +88,28 @@ fn fzf_files(path: &std::path::Path) -> String {
         println!("No passwords found");
         return String::new();
     } else {
-        let output = ProcessCommand::new("fzf")
+        let mut child = ProcessCommand::new("fzf")
             .arg("--height=40%")
             .arg("--border")
             .arg("--prompt=Select a password: ")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
-            .expect("Failed to spawn fzf")
-            .stdin.as_mut().expect("Failed to open stdin")
+            .expect("Failed to spawn fzf");
+
+        child.stdin.as_mut().expect("Failed to open stdin")
             .write_all(file_contents.as_bytes())
             .expect("Failed to write to stdin");
 
-        let output = ProcessCommand::new("fzf")
-            .arg("--height=40%")
-            .arg("--border")
-            .arg("--prompt=Select a password: ")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("Failed to spawn fzf")
-            .wait_with_output()
+        let output = child.wait_with_output()
             .expect("Failed to read stdout");
+
         if output.status.success() {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
+            let selected_password = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let mut clipboard: ClipboardContext = ClipboardProvider::new().expect("Failed to access clipboard");
+            clipboard.set_contents(selected_password.clone()).expect("Failed to copy to clipboard");
+            println!("Password copied to clipboard");
+            selected_password
         } else {
             println!("No selection made or fzf failed");
             String::new()
